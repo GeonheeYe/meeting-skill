@@ -1,0 +1,334 @@
+---
+name: meeting
+description: 회의 녹음 파일을 chunked Whisper STT로 처리하고, 선택적 화자분리를 적용한 뒤 Claude가 교정+요약한다. "/meeting <오디오파일> [회의제목] [화자수 N명] [컨텍스트] [참고문서.pdf ...]" 형식으로 호출. "/meeting record"로 녹음 시작. "/meeting setup"으로 초기 설정.
+---
+
+# Meeting 스킬
+
+오디오 파일을 받아 전체 파이프라인을 실행한다:
+오디오 보정 → chunked STT → (선택적) 화자분리 → Claude 교정+요약 → (선택적) Dooray 위키 업로드
+
+## 소스 추적
+
+- 실행 코드 저장소: `https://github.com/GeonheeYe/meeting-tools`
+- 로컬 실행 경로: `~/meeting_tools`
+- 환경 변수: `~/meeting_tools/.env`
+
+## 사용법
+
+~~~
+/meeting setup                                                    # 초기 설정 (처음 사용 시)
+/meeting record                                                   # 녹음 시작 (새 터미널 창)
+/meeting ~/meetings/audio.wav                                     # 기본 처리
+/meeting ~/meetings/audio.wav 스프린트 회의 4명 RAG, 파이프라인   # 화자분리 포함
+/meeting ~/meetings/audio.wav XQBot 리뷰 2명 BIRD,GRPO agenda.txt # 참고 문서 포함
+~~~
+
+- 기본 실행은 오디오 보정 + chunked STT다.
+- 화자 수(`N명`)를 주면 pyannote 화자 분리 실행. 없으면 생략(빠름).
+- 참고 문서(`.pdf`, `.txt`, `.md`, `.docx`)를 주면 STT 정확도 향상 + Claude 교정에 활용.
+
+---
+
+## `/meeting setup` — 초기 설정
+
+처음 사용하거나 새 환경에서 설치할 때 실행한다.
+
+### Step 1: meeting-tools 클론
+
+```bash
+if [ -d ~/meeting_tools ]; then
+  cd ~/meeting_tools && git pull
+else
+  git clone https://github.com/GeonheeYe/meeting-tools.git ~/meeting_tools
+fi
+```
+
+### Step 2: setup.sh 실행 + 하드웨어 감지 메시지 출력
+
+```bash
+cd ~/meeting_tools && bash setup.sh
+```
+
+setup.sh 완료 후 터미널 출력에서 하드웨어 감지 결과를 확인하고 사용자에게 다음 형식으로 안내한다:
+
+```
+✅ 환경 감지 완료
+   하드웨어: {감지된 환경}
+   사용 모델: {백엔드 + 모델}
+```
+
+하드웨어별 메시지:
+- Apple Silicon: `Apple Silicon M시리즈 (N GB RAM) → mlx-whisper large-v3`
+- NVIDIA ≥8GB VRAM: `NVIDIA {GPU명} ({N}GB VRAM) → faster-whisper large-v3 float16`
+- NVIDIA 4-8GB: `NVIDIA {GPU명} ({N}GB VRAM) → faster-whisper large-v3 int8`
+- CPU: `CPU ({N}GB RAM) → faster-whisper large-v3 int8`
+
+### Step 3: .env 파일 생성
+
+`~/meeting_tools/.env` 파일이 없으면 생성한다 (setup.sh가 이미 생성했으면 확인만):
+
+```
+# Hugging Face 토큰 (화자 분리 사용 시 필요)
+# 발급: https://huggingface.co/settings/tokens
+HF_TOKEN=
+
+# Dooray (아래 Step 4에서 연결하면 자동 입력됨)
+# DOORAY_API_TOKEN=
+# DOORAY_TENANT_URL=
+```
+
+파일 위치(`~/meeting_tools/.env`)와 편집 방법을 안내한다.
+
+### Step 4: Dooray MCP 설치 (선택)
+
+AskUserQuestion 도구로 묻는다:
+- 질문: "Dooray 위키에 회의록을 자동으로 올리겠습니까? (회의 후 위키 업로드가 자동화됩니다)"
+- 옵션 1: "네, Dooray에 연결합니다"
+- 옵션 2: "아니오, 나중에 설정합니다"
+
+**"네"인 경우:**
+
+AI 에이전트 종류 감지:
+
+```bash
+HAS_CLAUDE=$(command -v claude && echo yes || echo no)
+HAS_CODEX=$(command -v codex && echo yes || echo no)
+```
+
+Claude Code가 있으면:
+
+```bash
+claude mcp add -s user dooray-mcp npx @geonheeye/dooray-mcp@latest
+```
+
+Codex가 있으면 `~/.codex/config.json`에 MCP 서버 추가:
+
+```json
+{
+  "mcpServers": {
+    "dooray-mcp": {
+      "command": "npx",
+      "args": ["@geonheeye/dooray-mcp@latest"]
+    }
+  }
+}
+```
+
+그 다음 .env의 Dooray 항목 언커멘트 후 값 입력 방법 안내:
+
+```
+DOORAY_API_TOKEN 발급 방법:
+  두레이 접속 → 우상단 프로필 → 개인설정 → API → 개인 인증 토큰 생성
+
+DOORAY_TENANT_URL 예시:
+  https://your-company.dooray.com
+```
+
+사용자에게 `.env` 파일을 직접 편집하도록 안내하고, 완료했으면 알려달라고 한다.
+
+편집 완료 확인 후 AskUserQuestion 도구로 위키를 묻는다:
+- 질문: "회의록을 올릴 Dooray 위키 이름 또는 URL을 알려주세요."
+
+입력값을 받아 `mcp__dooray__get-wiki-list` 도구로 위키 목록을 조회하고 wiki_id를 찾는다.
+찾은 wiki_id를 이 SKILL.md 파일의 `## Dooray 설정` 섹션에 저장한다.
+
+**"아니오"인 경우:** Step 5로 넘어간다.
+
+### Step 5: 완료 안내
+
+```
+🎉 설정 완료!
+
+필수 입력 (~/meeting_tools/.env):
+  HF_TOKEN — 화자 분리(pyannote) 사용 시 필요
+  발급: https://huggingface.co/settings/tokens
+
+사용법:
+  /meeting ~/meetings/audio.wav              # 기본 처리
+  /meeting ~/meetings/audio.wav 회의제목 2명  # 화자 분리 포함
+  /meeting record                            # 녹음 시작
+```
+
+---
+
+## `/meeting` — 회의 처리 모드
+
+### Step 1: ARGUMENTS 파싱
+
+ARGUMENTS에서 다음 정보를 추출한다:
+
+- **오디오 파일 경로**: 첫 번째 인자 (또는 `record` 또는 `setup`)
+- **회의 제목**: 숫자, 파일 경로, 키워드처럼 보이지 않는 텍스트 부분
+- **화자 수**: "N명", "N people", "speakers N" 패턴에서 숫자 추출. 없으면 None
+- **컨텍스트**: 기술 용어나 회의 주제 설명 문자열 (파일 경로 아닌 것). 없으면 None
+- **참고 문서**: `.pdf`, `.txt`, `.md`, `.docx` 확장자를 가진 경로들. 없으면 None
+
+예시: `audio.wav XQBot 리뷰 2명 BIRD,GRPO agenda.txt`
+→ title=`XQBot 리뷰`, speakers=`2`, context=`BIRD,GRPO`, docs=`[agenda.txt]`
+
+**`setup`인 경우** — 위의 `/meeting setup` 플로우로 이동한다.
+
+**`record`인 경우** — 녹음 모드:
+
+```bash
+osascript -e 'tell application "Terminal" to do script "python3 ~/meeting_tools/record.py"'
+```
+
+사용자에게 안내:
+```
+새 터미널 창에서 녹음이 시작됩니다.
+Enter로 녹음 종료 후, 저장된 파일 경로로 다시 호출하세요:
+
+  /meeting ~/meetings/audio_YYYYMMDD_HHMM.wav [회의 제목] [화자수 N명] [키워드] [문서.pdf ...]
+```
+
+**오디오 파일 경로인 경우** — Step 2로 진행한다.
+
+### Step 2: 파이프라인 실행
+
+다음 명령을 실행하기 전에 사용자에게 알린다:
+```
+⏳ STT 파이프라인을 시작합니다. 오디오 길이에 따라 수 분 소요될 수 있습니다...
+```
+
+```bash
+cd ~/meeting_tools && .venv/bin/python3 pipeline.py <오디오파일경로> [회의제목] [--speakers N] [--context "컨텍스트"] [--docs 문서1 문서2]
+```
+
+예시 (화자분리 없음):
+```bash
+cd ~/meeting_tools && .venv/bin/python3 pipeline.py ~/meetings/audio.wav "스프린트 회의"
+```
+
+예시 (화자분리 + 참고 문서):
+```bash
+cd ~/meeting_tools && .venv/bin/python3 pipeline.py ~/meetings/audio.wav "XQBot 리뷰" --speakers 2 --context "BIRD,GRPO" --docs ~/docs/agenda.txt
+```
+
+명령이 완료되면 `{오디오파일디렉토리}/{오디오파일명}.json` 파일 경로가 출력된다.
+
+완료 후 안내:
+```
+✅ 파이프라인 완료
+```
+
+### Step 3: JSON 결과 읽기
+
+출력된 JSON 파일을 읽는다. 구조:
+```json
+{
+  "title": "[2026-03-13] 회의",
+  "date": "2026-03-13",
+  "speaker_count": 4,
+  "transcript": "[Speaker A]\n안녕하세요...",
+  "doc_content": "참고 문서 본문 (없으면 빈 문자열)",
+  "agenda_items": ["안건1", "안건2"],
+  "chunking_applied": true,
+  "audio_enhanced": true
+}
+```
+
+### Step 4: Claude 교정 + 요약
+
+**교정 (doc_content가 있을 때):**
+
+transcript에서 STT 오류를 doc_content 기반으로 교정한다.
+- doc_content에 등장하는 고유명사/기술 용어가 transcript에서 다르게 표기된 경우만 교정
+- 근거 없는 추측 교정 금지 — doc_content에 명시된 것만
+
+**요약:**
+
+교정된 transcript를 바탕으로 다음 3가지를 작성한다:
+
+- **회의 요약**: 핵심 내용 3-5줄
+- **액션 아이템**: agenda_items가 있으면 항목별 그룹화, 없으면 단순 목록
+
+  agenda_items가 있을 때:
+  ```
+  **1. {agenda_items[0]}**
+  - [ ] 내용 (기한)
+
+  **기타**
+  - [ ] 안건 외 명확히 도출된 액션
+  ```
+
+  agenda_items가 없을 때:
+  ```
+  - [ ] 내용 (기한)
+  ```
+
+- **주요 결정사항**: 대화록에 명확히 언급된 것만
+
+추측하지 말고 대화록에 명시된 내용만 포함한다.
+
+### Step 4.5: 사용자 확인 + 업로드 선택
+
+터미널에 출력:
+```
+---
+📋 회의 요약
+(요약 내용)
+
+✅ 액션 아이템
+(액션 아이템 목록)
+
+🔑 주요 결정사항
+(결정사항 목록)
+---
+```
+
+AskUserQuestion 도구로 묻는다:
+- 질문: "위 내용을 어디에 업로드할까요?"
+- 옵션 1: "Dooray 위키에 업로드"
+- 옵션 2: "업로드 없이 완료"
+
+**"Dooray 위키"인 경우:**
+
+이 SKILL.md의 `## Dooray 설정` 섹션에서 wiki_id를 읽어 `mcp__dooray__create-wiki-page` 도구로 생성:
+
+```
+subject: "[YYYY-MM-DD] 회의제목"
+content: (마크다운 — 회의 요약 + 액션 아이템 + 주요 결정사항)
+```
+
+content 구성:
+```markdown
+## 회의 요약
+- 요약 항목 1
+
+## 액션 아이템
+- [ ] 액션 1
+
+## 주요 결정사항
+- 결정 1
+```
+
+생성된 위키 페이지 URL을 안내한다.
+
+**"업로드 없이 완료"인 경우:**
+
+JSON 결과 파일 경로를 안내하고 종료한다.
+
+### Step 5: 완료 안내
+
+JSON 결과 파일은 원본 오디오와 같은 디렉토리에 보존한다 (재처리·디버깅용).
+
+---
+
+## Dooray 설정
+
+> `/meeting setup`에서 Dooray 연결 시 자동으로 채워집니다.
+
+```
+DOORAY_WIKI_ID=
+DOORAY_WIKI_PAGE_ID=
+```
+
+## 오디오 파일이 없는 경우
+
+녹음 방법을 안내한다:
+
+```bash
+osascript -e 'tell application "Terminal" to do script "python3 ~/meeting_tools/record.py"'
+```
