@@ -235,7 +235,7 @@ ARGUMENTS에서 다음 정보를 추출한다:
 **`record`인 경우** — 녹음 모드:
 
 ```bash
-osascript -e 'tell application "Terminal" to do script "python3 ~/meeting_tools/record.py"'
+osascript -e 'tell application "Terminal" to do script "cd ~/meeting_tools && .venv/bin/python3 record.py"'
 ```
 
 사용자에게 안내:
@@ -412,5 +412,5 @@ DOORAY_WIKI_PAGE_ID=
 녹음 방법을 안내한다:
 
 ```bash
-osascript -e 'tell application "Terminal" to do script "python3 ~/meeting_tools/record.py"'
+osascript -e 'tell application "Terminal" to do script "cd ~/meeting_tools && .venv/bin/python3 record.py"'
 ```
