@@ -17,11 +17,12 @@ description: 회의 녹음 파일을 chunked Whisper STT로 처리하고, 선택
 ## 사용법
 
 ~~~
-/meeting setup                                                    # 초기 설정 (처음 사용 시)
-/meeting record                                                   # 녹음 시작 (새 터미널 창)
-/meeting ~/meetings/audio.wav                                     # 기본 처리
-/meeting ~/meetings/audio.wav 스프린트 회의 4명 RAG, 파이프라인   # 화자분리 포함
-/meeting ~/meetings/audio.wav XQBot 리뷰 2명 BIRD,GRPO agenda.txt # 참고 문서 포함
+/meeting setup                                                         # 초기 설정 (처음 사용 시)
+/meeting record                                                        # 녹음 시작 (새 터미널 창)
+/meeting ~/meetings/audio.wav                                          # 기본 처리
+/meeting ~/meetings/audio.wav 스프린트 회의 4명 RAG, 파이프라인        # 화자분리 포함
+/meeting ~/meetings/audio.wav XQBot 리뷰 2명 project:내프로젝트        # 프로젝트 용어 활용
+/meeting ~/meetings/audio.wav XQBot 리뷰 2명 BIRD,GRPO agenda.txt     # 참고 문서 포함
 ~~~
 
 - 기본 실행은 오디오 보정 + chunked STT다.
@@ -79,6 +80,63 @@ HF_TOKEN=
 ```
 
 파일 위치(`~/meeting_tools/.env`)와 편집 방법을 안내한다.
+
+### Step 3.5: 주요 프로젝트 설정 (선택)
+
+AskUserQuestion 도구로 묻는다:
+- 질문: "주로 다루는 프로젝트가 있나요? 프로젝트 이름을 알려주시면 회의마다 고유명사·교정 패턴을 누적 저장해 STT 정확도가 높아집니다. 없으면 공통 환경으로 저장됩니다."
+- 옵션 1: "네, 프로젝트 이름을 입력합니다"
+- 옵션 2: "아니오, 공통 환경으로 사용합니다"
+
+**"네"인 경우:**
+
+프로젝트 이름을 입력받는다 (여러 개면 쉼표로 구분).
+
+각 프로젝트마다 `~/meeting_tools/projects/{name}/terms.md` 파일을 생성한다:
+
+```bash
+mkdir -p ~/meeting_tools/projects/{name}
+```
+
+terms.md 초기 내용:
+```markdown
+---
+name: {name} 프로젝트 용어
+description: STT 교정 및 요약에 활용되는 고유명사, 기술 용어, 오인식 패턴
+type: project
+---
+
+## 프로젝트명
+
+## 기술 용어
+
+## STT 오인식 교정 패턴
+
+| STT 오인식 | 올바른 표기 | 비고 |
+|------------|------------|------|
+
+---
+*마지막 업데이트: {오늘 날짜}*
+```
+
+생성 완료 후 안내:
+```
+📁 프로젝트 용어 파일 생성됨:
+  ~/meeting_tools/projects/{name}/terms.md
+
+사용법:
+  /meeting audio.wav 회의제목 project:{name}
+  /meeting audio.wav 회의제목 @{name}
+```
+
+**"아니오"인 경우:**
+
+```
+ℹ️ 프로젝트 미지정 시 회의록은 공통 환경으로 처리됩니다.
+나중에 프로젝트를 추가하려면:
+  mkdir -p ~/meeting_tools/projects/프로젝트명
+  # terms.md 파일 생성 후 /meeting에서 project:프로젝트명 으로 사용
+```
 
 ### Step 4: Dooray MCP 설치 (선택)
 
@@ -163,9 +221,14 @@ ARGUMENTS에서 다음 정보를 추출한다:
 - **화자 수**: "N명", "N people", "speakers N" 패턴에서 숫자 추출. 없으면 None
 - **컨텍스트**: 기술 용어나 회의 주제 설명 문자열 (파일 경로 아닌 것). 없으면 None
 - **참고 문서**: `.pdf`, `.txt`, `.md`, `.docx` 확장자를 가진 경로들. 없으면 None
+- **프로젝트 이름**: `project:프로젝트명` 또는 `@프로젝트명` 형식. 없으면 None
+  - 있으면 `~/meeting_tools/projects/{project}/terms.md`를 읽어 교정/요약에 활용
 
 예시: `audio.wav XQBot 리뷰 2명 BIRD,GRPO agenda.txt`
 → title=`XQBot 리뷰`, speakers=`2`, context=`BIRD,GRPO`, docs=`[agenda.txt]`
+
+예시: `audio.wav 스프린트 회의 4명 project:팀회의`
+→ title=`스프린트 회의`, speakers=`4`, project=`팀회의`
 
 **`setup`인 경우** — 위의 `/meeting setup` 플로우로 이동한다.
 
@@ -231,11 +294,17 @@ cd ~/meeting_tools && .venv/bin/python3 pipeline.py ~/meetings/audio.wav "XQBot 
 
 ### Step 4: Claude 교정 + 요약
 
-**교정 (doc_content가 있을 때):**
+**프로젝트 용어 로드 (project가 있을 때):**
 
-transcript에서 STT 오류를 doc_content 기반으로 교정한다.
-- doc_content에 등장하는 고유명사/기술 용어가 transcript에서 다르게 표기된 경우만 교정
-- 근거 없는 추측 교정 금지 — doc_content에 명시된 것만
+`~/meeting_tools/projects/{project}/terms.md` 파일을 읽는다.
+- 파일이 없으면 무시하고 진행한다.
+- STT 오인식 교정 패턴으로 transcript를 수정하고, 기술 용어를 교정·요약에 반영한다.
+
+**교정 (doc_content 또는 project terms가 있을 때):**
+
+transcript에서 STT 오류를 교정한다.
+- doc_content 또는 terms.md에 등장하는 고유명사/기술 용어가 다르게 표기된 경우만 교정
+- 근거 없는 추측 교정 금지 — 문서에 명시된 것만
 
 **요약:**
 
@@ -310,9 +379,22 @@ content 구성:
 
 JSON 결과 파일 경로를 안내하고 종료한다.
 
-### Step 5: 완료 안내
+### Step 5: 완료 안내 + 프로젝트 용어 저장
 
 JSON 결과 파일은 원본 오디오와 같은 디렉토리에 보존한다 (재처리·디버깅용).
+
+**프로젝트 용어 저장 (project가 있을 때):**
+
+회의 중 새로 등장한 고유명사나 사용자가 교정한 내용이 있으면
+`~/meeting_tools/projects/{project}/terms.md`에 추가한다:
+- 새 용어 → 기술 용어 섹션에 추가
+- 교정 패턴 → STT 오인식 교정 패턴 테이블에 추가
+- 마지막 업데이트 날짜 갱신
+
+새로 저장한 용어가 있으면 안내한다:
+```
+📝 [{project}] 용어 업데이트: [새로 추가된 용어 목록]
+```
 
 ---
 
